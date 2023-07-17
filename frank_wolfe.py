@@ -4,160 +4,224 @@ from scipy.optimize import LinearConstraint, Bounds
 import scipy.stats as ss
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import wandb
+import yaml
+from collections import defaultdict
 
-np.random.seed(42)
-rng = np.random.default_rng(42)
-
-
-
-
-# Given a list of mean and covariance,
-# draw from the Mixture of Gaussian distribution
-# according to the weights
+from utils import *
 
 
 
-def mixture_gaussians(weights, means, covs, size=1):
-    assert len(means) == len(covs) and len(covs) == len(weights)
-
-    assert np.sum(weights) == 1
-
-    mid_ind = np.random.choice(len(weights), size, replace=True, p=weights)
-
-    # This iteration is not efficient
-    samples = [rng.multivariate_normal(means[i], covs[i]) for i in mid_ind]
-
-    return np.array(samples).squeeze()
-
-
-# TODO: Add covs
-# No normalization, add 1/\sqrt(2pi) if want real likelihood
-
-gauss_likelihood = lambda x, mean: np.exp(-1/2*(x-mean)**2)
-
-
-def GM_likelihood(x, weights, means, covs=None):
-    M = len(weights)
-    res = 0
-    for k in range(M):
-        res += weights[k] * gauss_likelihood(x, means[k])
-    return res
-
-def GM_nll(X, weights, means, covs=None):
-    N = X.shape[0]
-    res = 0
-    for i in range(N):
-        res += -np.log(GM_likelihood(X[i], weights, means, covs))
-    return res / N
-
-
-# Generate Ground Truth
-K = 2
+# Generate sample data
+K = 1
 D = 1
 means = np.random.rand(K, D) * 10
+means = [[0]]
 weights = np.random.rand(K)
 weights /= np.sum(weights)
+weights = [1]
 covs = [np.eye(D) for _ in range(K)]
 
+# Number of supports
+# Remove too small alphas
+# Wasserstein distance to zero
+    # sum of alpha_i * |\theta_i|
+# Increase N, observe
+    # The number of support -> 1
+    # How does the W distance grow
+        # COMPARE with
+        # suppose we know it's one sample
+        # 1 / sqrt(N)
+        # |theta_i|
+    # run m experiments for this
 
-# Generate Data
-N = 10000
+# Theratical bound
+# NPMLE 1/ sqrt(N) (lower bound) , 1/ N^0.25 (theoratical upper bound).
 
-samples = mixture_gaussians(weights, means, covs, N)
+# Two mixtures
+# ==
+# two symmetric mixtures (-theta, theta) (0.5, 0.5)
+# same experiment as before
+# fix N, increase theta, at which point, when can algo tell there are two components (more far apart) => The threshold
+# Wasserstein distance
+    # linear program
+    # 
+    # as N grows
+# theoratical bound
+    # 1/N^(1/8), 1/N^(1/6), tightness
+
+# break the symmetry a little bit. un-balanced weights
+# plot the mixtures
+
+verbose=False
+
+def optional_print(*msg, **kwargs):
+    if verbose: print(*msg, **kwargs)
+
+
+def experiment(
+        N,
+        weights, means, covs,
+        stop_thres,
+        alpha_thres,
+        maxiter,
+
+):
+    samples = mixture_gaussians(weights, means, covs, N)
+    # Initialize with MLE estimator
+    thetas = [(np.mean(samples))]
+    alphas = np.array([1])
+
+    # One iteration of update
+    # Find the argmax of the gradient
+    def gradient(theta):
+        res = 0
+        for i in range(N):
+            # This may have overflow or instability problem
+            res += gauss_likelihood(samples[i], theta) / \
+                GM_likelihood(samples[i], alphas, thetas) # -1
+            if np.isnan(res).any():
+                optional_print("Has NaN in gradient calculation!")
+                exit(0)
+        
+        return res / N
+    optional_print("True Data NNL", GM_nll(samples, weights, means))
+
+    last_likelihood = None
+
+    for round in range(maxiter):
+        optional_print("="*30)
+        optional_print("Round", round)
+        optional_print("="*30)
+
+        optional_print("alphas:", [float(t) for t in alphas])
+        optional_print("thetas:", [float(t) for t in thetas])
+        optional_print("Negative log likelihood", GM_nll(samples, alphas, thetas))
+        
+        # Step 1: Find a new direction
+        # Find a new mean that maximizes the log likelihood
+        candidate_x0 = [-gradient(x0) for x0 in (range(20))]
+        x0 = np.argmin(candidate_x0)
+
+        optim = scipy.optimize.minimize(
+                lambda x: -gradient(x), 
+                x0,
+            )
+        
+        if optim.fun > -0.001:
+            optional_print("Gradient small, abort")
+            optional_print("Gradient:", optim.fun)
+            exit(0)
+        theta = optim.x
+        
+
+        # Step 2: line search for proper alpha
+        def objective2(alpha):
+            res = 0
+            for i in range(N):
+                orig = GM_likelihood(samples[i], alphas, thetas)
+                new = gauss_likelihood(samples[i], theta)
+                res += np.log((1-alpha) * orig + alpha*new)
+            return -res / N
+
+        optim2 = scipy.optimize.minimize(
+            objective2,
+            0,
+            bounds=Bounds(0, 1)
+        )
+        alpha = optim2.x
+        likelihood = optim2.fun
+
+
+        alphas = np.concatenate([(1-alpha)*alphas, alpha])
+        assert np.abs(np.sum(alphas) - 1) < 0.01, \
+                "Alphas should sum to one. Now it is %f" % np.sum(alphas)
+        alphas /= np.sum(alphas)
+
+        thetas = np.concatenate([thetas, theta])
+
+
+
+        # Step 3: STOP CRITERION
+        if last_likelihood and np.abs(last_likelihood - likelihood) < stop_thres:
+            break
+        last_likelihood = likelihood
+
+        
+
+    # ================================================================
+    # Post processing
+    # ================================================================
+
+    results = [(w, a) for (w, a) in zip(thetas, alphas)]
+    optional_print("Original length of results is:", len(results))
+    optional_print("After filtering, the length becomes: ", end='')
+    results = [(w, a) for (w, a) in results if a > alpha_thres]
+    optional_print(len(results))
+
+    w1 = ss.wasserstein_distance(np.array(means).reshape(-1), thetas, u_weights=weights, v_weights=alphas)
+
+
+    return {
+        "number of support": len(results), # Number of support after filtering
+        "W1": w1, # Wasserstein 1 distance
+    }
+
+
+with open("config.yml", "r") as infile:
+    config = yaml.full_load(infile)
+
+
+
+# start a new wandb run to track this script
+wandb.init(
+    # set the wandb project where this run will be logged
+    project="NPMLE",
+    
+    # track hyperparameters and run metadata
+    config=config
+)
+
+# define our custom x axis metric
+wandb.define_metric("N")
+# set all other train/ metrics to use this step
+wandb.define_metric("*", step_metric="N")
+
+
+
+for n in tqdm(range(1000, 2000, 100)):
+    res_dict = {}
+    for _ in range(config['simulation_times']):
+        res = experiment(n, weights, means, covs, **config['experiment'])
+        for k, v in res.items():
+            if k not in res_dict:
+                res_dict[k] = []
+            res_dict[k].append(v)
+    for k, v in res_dict.items():
+        res_dict[k] = np.mean(v)
+
+    res_dict['N'] = n
+    wandb.log(res_dict)
+    
+
+
+
 
 # ============================================================
 # Plot the sampled data
 # ============================================================
 
-print("Means:", means)
-print("Weights:", weights)
+# optional_print("Means:", means)
+# optional_print("Weights:", weights)
 # plt.hist(samples, bins=100)
-
+# plt.title("Samples")
 # plt.show()
 
 
 
-# Initialize with MLE estimator
-thetas = [(np.mean(samples))]
-alphas = np.array([1])
 
 
-# One iteration of update
-
-# Find the argmax of the gradient
-# 
-def gradient(theta):
-    res = 0
-    for i in range(N):
-        # This may have overflow or instability problem
-        res += gauss_likelihood(samples[i], theta) / \
-            GM_likelihood(samples[i], alphas, thetas) # -1
-        if np.isnan(res).any():
-            print("Has NaN in gradient calculation!")
-            exit(0)
-    
-    return res / N
-print("True Data NNL", GM_nll(samples, weights, means))
-
-# X = np.linspace(0, 20, 20)
-# plt.plot([-gradient(x) for x in X])
-# plt.show()
-# exit(0)
-
-for round in range(100):
-    print("="*30)
-    print("Round", round)
-    print("="*30)
-
-    print("alphas:", [float(t) for t in alphas])
-    print("thetas:", [float(t) for t in thetas])
-    print("Negative log likelihood", GM_nll(samples, alphas, thetas))
-    
-    # Step 1: Find a new direction
-    # Find a new mean that maximizes the log likelihood
-    candidate_x0 = [-gradient(x0) for x0 in (range(20))]
-    x0 = np.argmin(candidate_x0)
-    optim = scipy.optimize.minimize(
-            lambda x: -gradient(x), 
-            x0,
-        )
-    if optim.fun > -0.001:
-        print("Gradient small, abort")
-        print("Gradient:", optim.fun)
-        exit(0)
-    theta = optim.x
-    
-
-    # Step 2: line search for proper alpha
-    def objective2(alpha):
-        res = 0
-        for i in range(N):
-            orig = GM_likelihood(samples[i], alphas, thetas)
-            new = gauss_likelihood(samples[i], theta)
-            res += np.log((1-alpha) * orig + alpha*new)
-        return -res / N
-
-    alpha = scipy.optimize.minimize(
-        objective2,
-        0.5,
-        bounds=Bounds(0, 1)
-    ).x
-
-    if alpha < 0.01:
-        print("Alpha is small, abort")
-        print("Alpha:", alpha)
-        exit(0)
-
-
-    alphas = np.concatenate([(1-alpha)*alphas, alpha])
-    assert np.abs(np.sum(alphas) - 1) < 0.01, \
-            "Alphas should sum to one. Now it is %f" % np.sum(alphas)
-    alphas /= np.sum(alphas)
-
-    thetas = np.concatenate([thetas, theta])
-    
-
-# print("Adding new theta Data likelihood", data_GM_likelihood(samples, alphas, thetas))
+# optional_print("Adding new theta Data likelihood", data_GM_likelihood(samples, alphas, thetas))
 exit(0)
 
 # === 
@@ -236,7 +300,7 @@ g0 = ff(np.random.randn(feature))
 
 # g_true = np.stack([ff(omega) for omega in true_omega], axis=-1)
 
-# print(g_true.shape)
+# optional_print(g_true.shape)
 # from IPython import embed
 # embed() or exit(0)
 
@@ -338,19 +402,19 @@ for _ in range(20):
 
     g = get_combined_g(list_g, alpha)
 
-    # print("NLLL")
+    # optional_print("NLLL")
 
     # g = (1-alpha) * g + alpha * new_f
-    print("NLL:", nll(g, N))
-    print("SQ:", sq(g, N))
-    print("l1:", l1(g, N))
-    print("g:", g)
-    print("len_list_g:", len(list_g))
+    optional_print("NLL:", nll(g, N))
+    optional_print("SQ:", sq(g, N))
+    optional_print("l1:", l1(g, N))
+    optional_print("g:", g)
+    optional_print("len_list_g:", len(list_g))
     # break
 
-# print("NLL for g0:", nll(g0, N, z))
+# optional_print("NLL for g0:", nll(g0, N, z))
 
-# print("NLL for ", nll((1-alpha)*g0 + alpha*new_f, N, z))
+# optional_print("NLL for ", nll((1-alpha)*g0 + alpha*new_f, N, z))
 
 
 

@@ -1,0 +1,12 @@
+---
+N: 10000
+experiment:
+  stop_thres: 0.001
+  maxiter: 100
+  alpha_thres: 0.001
+
+simulation_times: 10 # TODO: Larger
+
+N_start: 1000
+N_end: 10000
+N_step: 100
