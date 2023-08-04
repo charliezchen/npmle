@@ -1,12 +1,13 @@
 ---
-N: 10000
 experiment:
-  stop_thres: 0.001
+  stop_thres: 0.000000001
   maxiter: 100
-  alpha_thres: 0.001
+  alpha_thres: 0.01
 
-simulation_times: 10 # TODO: Larger
+# mixture: 2
+# mixture_two_distance: 1
+simulation_times: 1000
 
 N_start: 1000
-N_end: 10000
-N_step: 100
+N_end: 31000
+N_step: 1000
