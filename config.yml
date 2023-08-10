@@ -1,11 +1,9 @@
 ---
 experiment:
-  stop_thres: 0.000000001
-  maxiter: 100
+  stop_thres: 0.001
+  maxiter: 200
   alpha_thres: 0.01
 
-# mixture: 2
-# mixture_two_distance: 1
 simulation_times: 1000
 
 N_start: 1000

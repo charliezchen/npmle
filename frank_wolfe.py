@@ -11,11 +11,11 @@ from joblib import Parallel, delayed
 import multiprocessing
 
 from utils import *
+import os
+import pickle
+from collections import defaultdict
 
 import argparse
-
-with open("config.yml", "r") as infile:
-    config = yaml.full_load(infile)
 
 def parse_args():
     parser = argparse.ArgumentParser(description='')
@@ -23,27 +23,41 @@ def parse_args():
     parser.add_argument("--mixture-two-distance", type=int, default=2)
     parser.add_argument("--debug-N", type=int, default=100)
     parser.add_argument("--debug", action='store_true')
+    parser.add_argument("--folder", type=str, required=True)
+    parser.add_argument("--config", type=str, default='config.yml')
     
     return parser.parse_args()
 args = parse_args()
+with open(args.config, "r") as infile:
+    config = yaml.full_load(infile)
+
 args_dict = vars(args)
 for k, v in args_dict.items():
     config[k] = v
 
-# Generate sample data
+target_folder = args.folder
+if not os.path.exists(target_folder):
+    os.makedirs(target_folder)
 
+# Generate sample data
 if config['mixture'] == 1:
-    means = [[1]]
+    means = [1]
     weights = [1]
     covs = [np.eye(1) for _ in range(1)]
+    theta0 = 1
 elif config['mixture'] == 2:
     a = config['mixture_two_distance']
-    means = [[a], [-a]]
+    means = [-a, a]
     weights = [0.5, 0.5]
     covs = [np.eye(1) for _ in range(2)]
+    theta0 = np.random.randn()
 else:
     print("Not supported mixture number")
     exit(0)
+
+if 'reweight_type' not in config['experiment']:
+    config['experiment']['reweight_type'] = 'all'
+
 
 print("-"*30)
 print("Config")
@@ -94,138 +108,287 @@ def get_f(theta, samples):
     f = gauss_likelihood(samples, theta)
     return f
 
-def experiment(
-        N,
-        weights, means, covs,
-        stop_thres,
-        alpha_thres,
-        maxiter,
 
-):
-    samples = mixture_gaussians(weights, means, covs, N)
+class NonParametricEstimator:
+    def __init__(self, samples, init_theta, reweight_type):
+        self.thetas = [init_theta]
+        self.alphas = [1]
+        self.f = [get_f(init_theta, samples)]
+        self.history = []
+        self.samples = samples
+        self.N = len(samples)
+        self.stepwise_plot = False
 
-    # Initialize with MLE estimator
-    thetas = [(np.mean(samples))]
-    alphas = np.array([1])
-    # thetas = [-1, 1]
-    # alphas = np.ones(2) * 0.5
-    f_thetas = [get_f(thetas[0], samples)]
-    # f_thetas = [get_f(thetas[0], samples), get_f(thetas[1], samples)]
-
-    # TODO: NPMLE local minimum
-    # new direction: precision not enough
-    # increase resolution
-
-    # Different initializations
-    # Two mixture, wrong bias
-    # Grid resolution for new 
-    # gradient descent: stop criterion
-
-
-    # One iteration of update
-    # Find the argmax of the gradient
-    def gradient(theta):
-        new_f = get_f(theta, samples)
-        denom = np.stack([alphas[i] * f_thetas[i] for i in range(len(alphas))]).sum(axis=0)
-        return (new_f / denom).mean()
-    optional_print("True Data NNL", GM_nll(samples, weights, means))
-
-    last_likelihood = None
-
-    for round in range(maxiter):
-        optional_print("="*30)
-        optional_print("Round", round)
-        optional_print("="*30)
-
-        optional_print(format_float_list("thetas", thetas))
-        optional_print(format_float_list("alphas", alphas))
-        optional_print("Negative log likelihood", GM_nll(samples, alphas, thetas))
-        
+        self.reweight_type = reweight_type
+    
+    def get_new_theta(self):
         # Step 1: Find a new direction
         # Find a new mean that maximizes the log likelihood
         restart_init = np.linspace(-5, 5, 100)
-        candidate_x0 = [-gradient(x0) for x0 in restart_init]
+        candidate_x0 = [-self.calculate_derivative(x0) for x0 in restart_init]
         x0 = restart_init[np.argmin(candidate_x0)]
 
-        # x = np.linspace(-5, 5, 100)
-        # y = [gradient(i) for i in x]
-        # plt.plot(x, y)
-        # plt.show()
-        # exit(0)
+        if self.stepwise_plot:
+            x = np.linspace(-5, 5, 100)
+            y = [self.calculate_derivative(i) for i in x]
+            plt.plot(x, y)
+            plt.show()
 
         optim = scipy.optimize.minimize(
-                lambda x: -gradient(x), 
+                lambda x: -self.calculate_derivative(x), 
                 x0,
             )
-        theta = optim.x
+        theta = float(optim.x)
+        optional_print("D:", optim.fun)
+        optional_print("Upper bound:", self.N * np.log(1-optim.fun/self.N))
         # theta = np.array([x0])
-        
+        return theta, optim.fun
 
-        # Step 2: line search for proper alpha
-        # def objective2(alpha):
-        #     res = 0
-        #     for i in range(N):
-        #         orig = GM_likelihood(samples[i], alphas, thetas)
-        #         new = gauss_likelihood(samples[i], theta)
-        #         res += np.log((1-alpha) * orig + alpha*new)
-        #     return -res / N
+    def calculate_derivative(self, theta):
+        new_f = get_f(theta, self.samples)
+        denom = np.stack([self.alphas[i] * self.f[i] for i in range(len(self.alphas))]).sum(axis=0)
+        return (new_f / denom - 1).sum()
 
-        # optim2 = scipy.optimize.minimize(
-        #     objective2,
-        #     0,
-        #     bounds=Bounds(0, 1)
-        # )
+    def add_theta(self, theta):
+        new_f = get_f(theta, self.samples)
+        self.f.append(new_f)
+        self.alphas.append(0)
+        self.thetas.append(theta)
 
-        def objective2(new_alphas):
+    # There can be two strategies
+    def reweight_alphas_linear(self):
+        def objective(epsilon):
             res = 0
-            new_thetas = np.concatenate([thetas, theta])
-            for i in range(N):
-                res += np.log(GM_likelihood(samples[i], new_alphas, new_thetas))
-            return -res / N
+            for i in range(self.N):
+                orig = GM_likelihood(self.samples[i], self.alphas[:-1], self.thetas[:-1])
+                new = gauss_likelihood(self.samples[i], self.thetas[-1])
+                res += np.log((1-epsilon) * orig + epsilon*new)
+            return -res
+        
+        x=np.linspace(0,1,100)
+        y=objective(x)
 
+        if self.stepwise_plot:
+            plt.plot(x,y)
+            plt.title("NLL over epsilon")
+            plt.show()
+
+        optim = scipy.optimize.minimize(
+            objective,
+            0,
+            bounds=Bounds(0, 1)
+        )
+        epsilon = optim.x
+        self.alphas *= (1-epsilon)
+        self.alphas[-1] = epsilon
+
+        return epsilon
+    def reweight_alphas(self):
+        if self.reweight_type == 'linear':
+            return self.reweight_alphas_linear()
+
+        def objective(alphas):
+            res = 0
+            for i in range(self.N):
+                res += np.log(GM_likelihood(self.samples[i], alphas, self.thetas))
+            return -res
         # Define the constraints for the sum of weights
         cons = ({'type': 'eq',
              'fun' : lambda x: x.sum()-1})
-        x0 = np.concatenate([alphas, [0]])
+
+        x0 = self.alphas
         bnds = [(0, None) for _ in x0]
         optim2 = scipy.optimize.minimize(
-            objective2,
+            objective,
             x0,
             bounds=bnds, #  Bounds(0,1)
             method='SLSQP',
             constraints=cons
         )
 
-        alphas = optim2.x
-        likelihood = optim2.fun # TODO: LOG
+        # Is this step correct? smaller step?
+        # VDM?
+        self.alphas = optim2.x.tolist()
 
+        return self.alphas
 
-        # alphas = np.concatenate([(1-alpha)*alphas, alpha])
-        assert np.abs(np.sum(alphas) - 1) < 0.01, \
-                "Alphas should sum to one. Now it is %f" % np.sum(alphas)
-        alphas /= np.sum(alphas)
+    def check_new_theta(self, theta, thres=0.01):
+        for t in self.thetas:
+            if np.abs(theta-t) < thres:
+                return False
+        
+        return True
+    
+    def evaluate_nnl(self):
+        LL = 0
+        for k in range(self.N):
+            LL += np.log(np.sum(([self.alphas[i] * self.f[i][k] for i in range(len(self.alphas))])))
+        return -LL
 
-        thetas = np.concatenate([thetas, theta])
-        f_thetas.append(get_f(theta, samples))
-
+    def sort(self):
         # # # sort
-        pair = list(zip(thetas, alphas, f_thetas))
+        pair = list(zip(self.thetas, self.alphas, self.f))
         pair.sort(key=lambda x:x[0])
-        # # if round ==1:
-        # #     from IPython import embed
-        # #     embed() or exit(0)
-        thetas, alphas, f_thetas = zip(*pair)
-        f_thetas = list(f_thetas)
+        self.thetas, self.alphas, self.f= map(list, zip(*pair))
+    
+    def filter(self, thres=0.01):
+        mask = [alpha > thres for alpha in self.alphas]
+        self.thetas = [self.thetas[i] for i in range(len(self.thetas)) if mask[i]]
+        self.alphas = [self.alphas[i] for i in range(len(self.alphas)) if mask[i]]
+    
+def merge(thetas, alphas, thres=0.1):
 
-        if last_likelihood: optional_print("llh", last_likelihood - likelihood)
+    new_thetas, new_alphas = [], []
+    i = 0
+    while i < len(alphas):
+        j = i + 1
+        while j < len(alphas) and \
+                thetas[j] - thetas[j-1] <= thres:
+                j += 1
+        tmp_alphas = alphas[i:j] 
+        tmp_thetas = thetas[i:j] 
+        
+        if sum(tmp_alphas) == 0:
+            i = j
+            continue
+        new_thetas.append(sum([tmp_alphas[i] * tmp_thetas[i] \
+                                for i in range(len(tmp_alphas))]) / sum(tmp_alphas))
+        new_alphas.append(sum(tmp_alphas))
 
-        w1 = ss.wasserstein_distance(np.array(means).reshape(-1), thetas, u_weights=weights, v_weights=alphas)
-        optional_print("W1", f"{w1:.2f}")
+        i = j
+    return new_thetas, new_alphas
+
+def filter(thetas, alphas, thres=0.01):
+    mask = [a > thres for a in alphas]
+    thetas = [thetas[i] for i in range(len(thetas)) if mask[i]]
+    alphas = [alphas[i] for i in range(len(alphas)) if mask[i]]
+    return thetas, alphas
+
+    
+class Logger:
+    def __init__(self, true_thetas, true_alphas):
+        self.theta_history = []
+        self.alpha_history = []
+        self.merged_theta_history = []
+        self.merged_alpha_history = []
+        self.nnl_history = []
+        self.w1_history = []
+        self.true_thetas = true_thetas
+        self.true_alphas = true_alphas
+        self.debug_values = defaultdict(list)
+        self.t=0
+
+    def log(self, estimator):
+        thetas, alphas = estimator.thetas, estimator.alphas
+        self.theta_history.append(thetas)
+        self.alpha_history.append(alphas)
+        merged_theta, merged_alpha = merge(thetas, alphas)
+        self.merged_theta_history.append(merged_theta)
+        self.merged_alpha_history.append(merged_alpha)
+        self.nnl_history.append(estimator.evaluate_nnl())
+        self.w1_history.append(ss.wasserstein_distance(self.true_thetas, thetas,
+                                                       self.true_alphas, alphas))
+        self.t += 1
+    
+    def log_key(self, key, value):
+        self.debug_values[key].append(value)
+
+    def display(self, thres=0.01):
+        formatted_thetas = [f"{theta:.2f}" for theta in self.theta_history[-1]]
+        formatted_alphas = [f"{alpha:.2f}" for alpha in self.alpha_history[-1]]
+        optional_print("Thetas:", *formatted_thetas)
+        optional_print("Alphas:", *formatted_alphas)
+
+        formatted_thetas = [f"{theta:.2f}" for theta in self.merged_theta_history[-1]]
+        formatted_alphas = [f"{alpha:.2f}" for alpha in self.merged_alpha_history[-1]]
+        optional_print("Merged Thetas:", *formatted_thetas)
+        optional_print("Merged Alphas:", *formatted_alphas)
+
+        optional_print("W1", f"{self.w1_history[-1]:.2f}")
+        optional_print("NNL", f"{self.nnl_history[-1]:.2f}")
+    
+    def plot_history(self):
+        for i in range(self.t):
+            plt.clf()
+            plt.xlim(-5, 5)
+            plt.ylim(0, 1)
+            plt.scatter(self.merged_theta_history[i], self.merged_alpha_history[i])
+            plt.title(f"alphas over thetas (t={i})")
+            # plt.show()
+            plt.pause(10/self.t)
+        plt.show()
+    
+    def plot_all_keys(self):
+        for key, value in self.debug_values.items():
+            plt.plot(value)
+            plt.title(key)
+            plt.show()
+
+    def plot_nnl(self):
+        plt.plot(self.nnl_history)
+        plt.title("NNL over iteration")
+        plt.show()
+    
+    def result(self, filtering_thres):
+        res = {}
+        res['nnl'] = self.nnl_history[-1]
+        res['w1'] = self.w1_history[-1]
+        last_theta, last_alpha = self.merged_theta_history[-1], self.merged_alpha_history[-1]
+        last_theta, last_alpha = filter(last_theta, last_alpha, filtering_thres)
+        res['n'] = len(last_theta)
+        return res
+
+
+
+def experiment(
+        N,
+        weights, means, covs,
+        stop_thres,
+        alpha_thres,
+        reweight_type,
+        maxiter,
+):
+    samples = mixture_gaussians(weights, means, covs, N)
+    
+    if verbose:
+        plt.hist(samples, bins=30)
+        plt.show()
+
+    estimator = NonParametricEstimator(samples, theta0, reweight_type)
+    logger = Logger(means,weights)
+    logger.log(estimator)
+    # optional_print("True Data NNL", estimator.evaluate_nnl())
+    optional_print("True Data NNL", GM_nll(samples, weights, means))
+
+
+    last_nll = None
+
+    for round in range(maxiter):
+        optional_print("="*30)
+        optional_print("Round", round)
+        optional_print("="*30)
+
+        new_theta, D = estimator.get_new_theta()
+
+        optional_print("New theta:", new_theta)
+        estimator.add_theta(new_theta)
+        epsilon = estimator.reweight_alphas()
+        optional_print("Epsilon:", epsilon)
+        estimator.sort()
+
+        logger.log(estimator)
+        logger.log_key("derivative", -D)
+        
+        logger.display()
+        nll = logger.nnl_history[-1]
+        optional_print("Negative log likelihood", nll)
+
+        if last_nll: optional_print("Change in NLL", last_nll - nll)
 
         # Step 3: STOP CRITERION
-        if last_likelihood and np.abs(last_likelihood - likelihood) < stop_thres:
+        if last_nll and (last_nll - nll) < stop_thres:
             break
-        last_likelihood = likelihood
+        last_nll = nll
 
     # ================================================================
     # Post processing
@@ -233,6 +396,12 @@ def experiment(
     optional_print("="*30)
     optional_print("Post processing")
     optional_print("="*30)
+    if verbose:
+        logger.plot_history()
+        logger.plot_nnl()
+        logger.plot_all_keys()
+    
+    return logger.result(alpha_thres)
 
     results = [(w, a) for (w, a) in zip(thetas, alphas)]
     optional_print("Original length of results is:", len(results))
@@ -258,21 +427,21 @@ if args.debug:
     num_cores = 1
 
 
-for n in (range(config['N_start'], config['N_end'], config['N_step'])):
+for N in (range(config['N_start'], config['N_end'], config['N_step'])):
 # for n in [2**i for i in range(5, 12)]:
     if args.debug:
-        n = args.debug_N
+        N = args.debug_N
     print("-"*20)
-    print("N:", n)
+    print("N:", N)
     print("-"*20)
     res_dict = {}
 
     if args.debug:
-        experiment(n, weights, means, covs, **config['experiment'])
+        experiment(N, weights, means, covs, **config['experiment'])
         exit(0)
 
     results = Parallel(n_jobs=num_cores) \
-              (delayed(experiment)(n, weights, means, covs, **config['experiment']) \
+              (delayed(experiment)(N, weights, means, covs, **config['experiment']) \
                for _ in range(config['simulation_times']))
 
     # for _ in range(config['simulation_times']):
@@ -282,14 +451,14 @@ for n in (range(config['N_start'], config['N_end'], config['N_step'])):
         #         res_dict[k] = []
         #     res_dict[k].append(v)
     for k, v in results[0].items():
-        res_dict[k] = np.mean([res[k] for res in results])
-    
+        res_dict[f'{k}_mean'] = np.mean([res[k] for res in results])
+        res_dict[f'{k}_std'] = np.std([res[k] for res in results])
 
-    res_dict['N'] = n
-    # wandb.log(res_dict)
-    print(res_dict, flush=True)
+    res_dict['N'] = N
 
-
+    with open(os.path.join(target_folder, f"{N}.pkl"), 'wb') as f:
+        pickle.dump(res_dict, f)
+    print(res_dict)
 
 
 
@@ -303,206 +472,4 @@ for n in (range(config['N_start'], config['N_end'], config['N_step'])):
 # plt.hist(samples, bins=100)
 # plt.title("Samples")
 # plt.show()
-
-
-
-
-
-# optional_print("Adding new theta Data likelihood", data_GM_likelihood(samples, alphas, thetas))
-exit(0)
-
-# === 
-
-
-
-# def f(theta):
-#     res = 0
-#     for i in range(100):
-#         # res += np.exp(-1/2*(samples[i] - theta)**2)
-#         res += gauss_likelihood(samples[i], theta)
-#     return res/100
-
-X = np.linspace(-2, 2, 40)
-y = [objective(x) for x in X]
-plt.plot(X, y)
-plt.show()
-
-
-exit(0)
-
-
-
-"""
-Assumption:
-    1. There is only one customer
-"""
-
-# The number of products
-n = 1
-
-# The number of features
-feature = 1
-
-# Total number of purchasing history
-T = 20
-
-# Sales for product at different time | n x T
-N = np.random.randint(1, feature, (n, T))
-
-
-
-Nj / N, 
-
-# Features of the products | n x T x feature
-z = np.random.rand(n, T, feature)
-
-
-# The distribution of the customer
-def generate_customer_mixture_guassian(m):
-    means = []
-    covs = []
-    for _ in range(m):
-        means.append(np.random.rand(feature) * 0)
-        covs.append(np.diag(np.random.randint(1, 1, feature)))
-    weights = np.random.rand(m)
-    weights /= np.linalg.norm(weights, 1)
-    weights = weights.tolist()
-
-    return lambda : mixture_gaussians(means, covs, weights)
-
-# The customer mixture
-Q = generate_customer_mixture_guassian(1)
-
-## Start with naive one modal or two modals.
-
-
-# The sampled omega for different t | T x feature
-true_omega = [Q() for _ in range(T)]
-
-# The z is fixed
-ff = lambda x:f(x, z)
-
-# Randomly initialize g_0 | length n x T
-g0 = ff(np.random.randn(feature))
-
-# g_true = np.stack([ff(omega) for omega in true_omega], axis=-1)
-
-# optional_print(g_true.shape)
-# from IPython import embed
-# embed() or exit(0)
-
-
-
-# Algorithm start
-
-# Step 1: support finding
-
-# gs has the shape n x T
-# 
-def grad_nll(omega, N, g,):
-    ans = 0
-    new_f = ff(omega)
-    for t in range(T):
-        for j in range(n):
-            ans += N[j][t] / g[j][t] * new_f[j][t]
-    return -ans / np.sum(N)
-
-# omega feature x 1
-def nll(g, N):
-    ans = 0
-    for t in range(T):
-        for j in range(n):
-            ans += N[j][t] * np.log(g[j][t])
-    return -ans / (np.sum(N))
-
-def grad_sq(omega, N, g):
-    ans = 0
-    new_f = ff(omega)
-    for t in range(T):
-        Nt = np.sum([N[i][t] for i in range(len(N))])
-        for j in range(n):
-            ans += (Nt * g[j][t] - N[j][t]) * new_f[j][t]
-    return ans / np.sum(N)
-
-def sq(g, N):
-    ans = 0
-    for t in range(T):
-        Nt = np.sum([N[i][t] for i in range(len(N))])
-        for j in range(n):
-            yjt = N[j][t] / Nt
-            ans += (g[j][t] - yjt)**2
-    return ans / (2*np.sum(N))
-
-def grad_l1(omega, N, g):
-    ans = 0
-    new_f = ff(omega)
-    for t in range(T):
-        Nt = np.sum([N[i][t] for i in range(len(N))])
-        for j in range(n):
-            if g[j][t] > N[j][t] / Nt:
-                sign = 1
-            else:
-                sign = -1
-            ans += Nt * sign * new_f[j][t]
-    return ans / np.sum(N)
-
-def l1(g, N):
-    ans = 0
-    for t in range(T):
-        Nt = np.sum([N[i][t] for i in range(len(N))])
-        for j in range(n):
-            yjt = N[j][t] / Nt
-            ans += np.sum(np.abs(g[j][t] - yjt))
-    return ans / (np.sum(N))
-
-list_g = [g0]
-
-# Scalar 1. the dimension of the gaussian
-# weighted sum of list_g
-
-g = g0
-alpha = 0.001
-
-def get_combined_g(list_g, alpha):
-    assert len(list_g) == len(alpha)
-    return np.sum(np.stack([alpha[i] * list_g[i] for i in range(len(list_g))]), axis=0)
-
-for _ in range(20):
-    objective = lambda x: grad_nll(x, N, g)
-    omega_0 = np.random.randn(feature)
-    new_omega = scipy.optimize.minimize(objective, omega_0, method='BFGS').x
-    new_f = f(new_omega, z)
-
-    list_g.append(new_f)
-
-    def objective(alpha):
-        iterate_g = get_combined_g(list_g, alpha)
-        return nll(iterate_g, N)
-    
-    
-
-    alpha0 = np.random.rand(len(list_g))
-    alpha0 /= np.sum(alpha0)
-    constraint = LinearConstraint(np.ones_like(alpha0), 1, 1)
-    bounds = Bounds(np.zeros_like(alpha0))
-    alpha = scipy.optimize.minimize(objective, alpha0, constraints=[constraint], bounds=bounds).x
-
-    g = get_combined_g(list_g, alpha)
-
-    # optional_print("NLLL")
-
-    # g = (1-alpha) * g + alpha * new_f
-    optional_print("NLL:", nll(g, N))
-    optional_print("SQ:", sq(g, N))
-    optional_print("l1:", l1(g, N))
-    optional_print("g:", g)
-    optional_print("len_list_g:", len(list_g))
-    # break
-
-# optional_print("NLL for g0:", nll(g0, N, z))
-
-# optional_print("NLL for ", nll((1-alpha)*g0 + alpha*new_f, N, z))
-
-
-
 

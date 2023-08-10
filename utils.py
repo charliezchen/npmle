@@ -21,7 +21,7 @@ def mixture_gaussians(weights, means, covs, size=1):
     mid_ind = np.random.choice(len(weights), size, replace=True, p=weights)
 
     # This iteration is not efficient
-    samples = [rng.multivariate_normal(means[i], covs[i]) for i in mid_ind]
+    samples = [rng.normal(means[i], covs[i]) for i in mid_ind]
 
     return np.array(samples).squeeze()
 
@@ -46,7 +46,7 @@ def GM_nll(X, weights, means, covs=None):
     res = 0
     for i in range(N):
         res += -np.log(GM_likelihood(X[i], weights, means, covs))
-    return res / N
+    return res
 
 def format_float_list(name, float_list):
     try:
