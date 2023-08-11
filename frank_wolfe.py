@@ -21,7 +21,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='')
     parser.add_argument("--mixture", type=int)
     parser.add_argument("--mixture-two-distance", type=int, default=2)
-    parser.add_argument("--debug-N", type=int, default=100)
+    parser.add_argument("--N", type=int, required=True)
     parser.add_argument("--debug", action='store_true')
     parser.add_argument("--folder", type=str, required=True)
     parser.add_argument("--config", type=str, default='config.yml')
@@ -347,8 +347,9 @@ def experiment(
         alpha_thres,
         reweight_type,
         maxiter,
+        thread_id
 ):
-    samples = mixture_gaussians(weights, means, covs, N)
+    samples = mixture_gaussians(weights, means, covs, N, thread_id)
     
     if verbose:
         plt.hist(samples, bins=30)
@@ -426,50 +427,33 @@ num_cores = multiprocessing.cpu_count()
 if args.debug:
     num_cores = 1
 
+N = args.N
 
-for N in (range(config['N_start'], config['N_end'], config['N_step'])):
-# for n in [2**i for i in range(5, 12)]:
-    if args.debug:
-        N = args.debug_N
-    print("-"*20)
-    print("N:", N)
-    print("-"*20)
-    res_dict = {}
+print("-"*20)
+print("N:", N)
+print("-"*20)
+res_dict = {}
 
-    if args.debug:
-        experiment(N, weights, means, covs, **config['experiment'])
-        exit(0)
+if args.debug:
+    experiment(N, weights, means, covs, **config['experiment'], thread_id=0)
+    exit(0)
 
-    results = Parallel(n_jobs=num_cores) \
-              (delayed(experiment)(N, weights, means, covs, **config['experiment']) \
-               for _ in range(config['simulation_times']))
+results = Parallel(n_jobs=num_cores) \
+            (delayed(experiment)(N, weights, means, covs, **config['experiment'],thread_id=i) \
+            for i in range(config['simulation_times']))
 
-    # for _ in range(config['simulation_times']):
-        # res = experiment(n, weights, means, covs, **config['experiment'])
-        # for k, v in res.items():
-        #     if k not in res_dict:
-        #         res_dict[k] = []
-        #     res_dict[k].append(v)
-    for k, v in results[0].items():
-        res_dict[f'{k}_mean'] = np.mean([res[k] for res in results])
-        res_dict[f'{k}_std'] = np.std([res[k] for res in results])
+# for _ in range(config['simulation_times']):
+    # res = experiment(n, weights, means, covs, **config['experiment'])
+    # for k, v in res.items():
+    #     if k not in res_dict:
+    #         res_dict[k] = []
+    #     res_dict[k].append(v)
+for k, v in results[0].items():
+    res_dict[k] = np.array([res[k] for res in results])
 
-    res_dict['N'] = N
+res_dict['N'] = N
 
-    with open(os.path.join(target_folder, f"{N}.pkl"), 'wb') as f:
-        pickle.dump(res_dict, f)
-    print(res_dict)
+with open(os.path.join(target_folder, f"{N}.pkl"), 'wb') as f:
+    pickle.dump(res_dict, f)
 
-
-
-
-# ============================================================
-# Plot the sampled data
-# ============================================================
-
-# optional_print("Means:", means)
-# optional_print("Weights:", weights)
-# plt.hist(samples, bins=100)
-# plt.title("Samples")
-# plt.show()
 

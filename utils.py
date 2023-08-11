@@ -5,15 +5,14 @@ import scipy.stats as ss
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-np.random.seed(42)
-rng = np.random.default_rng(42)
-
+# np.random.seed(42)
 """
 Given a list of mean and covariance,
 draw from the Mixture of Gaussian distribution
 according to the weights
 """
-def mixture_gaussians(weights, means, covs, size=1):
+def mixture_gaussians(weights, means, covs, size=1, seed=0):
+    rng = np.random.default_rng(seed)
     assert len(means) == len(covs) and len(covs) == len(weights)
 
     assert np.sum(weights) == 1

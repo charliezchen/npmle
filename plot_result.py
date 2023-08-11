@@ -7,6 +7,7 @@ import sys
 import os
 import re
 import pickle
+import seaborn as sns
 
 # Read data from file
 target_folder = sys.argv[1]
@@ -24,11 +25,37 @@ data_dict = {}
 for key in data[0].keys():
     data_dict[key] = np.array([d[key] for d in data])
 
+def get_mean_and_std(series):
+    return series.mean(axis=1), series.std(axis=1)
+
+number_of_simulation = data_dict['w1'].shape[-1]
+
+# W1 vs N
+x=data_dict['N'].repeat(number_of_simulation, axis=-1)
+y=data_dict['w1'].reshape(-1)
+sns.violinplot(x=x,y=y,hue=np.ones_like(x))
+plt.xlabel("N")
+plt.ylabel("W1")
+plt.show()
+
+y=data_dict['n'].reshape(-1)
+sns.violinplot(x=x,y=y,hue=np.ones_like(x))
+plt.xlabel("N")
+plt.ylabel("# supp")
+plt.show()
+
+y=np.log(data_dict['w1'].reshape(-1))
+sns.violinplot(x=np.log(x),y=y,hue=np.ones_like(x))
+plt.xlabel("log N")
+plt.ylabel("log W1")
+plt.show()
+
 
 # Plot W1 vs N
-plt.plot(data_dict['N'], data_dict['w1_mean'], 'ro--')
-upper = data_dict['w1_mean'] + data_dict['w1_std']
-lower = data_dict['w1_mean'] - data_dict['w1_std']
+w1_mean, w1_std = get_mean_and_std(data_dict['wa'])
+plt.plot(data_dict['N'], w1_mean, 'ro--')
+upper = w1_mean + w1_std
+lower = w1_mean - w1_std
 
 plt.fill_between(data_dict['N'], lower, upper, alpha=0.3)
 plt.title('W1 versus N')
@@ -36,11 +63,15 @@ plt.xlabel('N')
 plt.ylabel('W1')
 plt.show()
 
+exit(0)
+
 
 # Plot W1 vs N
-plt.plot(data_dict['N'], data_dict['n_mean'], 'ro--')
-upper = data_dict['n_mean'] + data_dict['n_std']
-lower = data_dict['n_mean'] - data_dict['n_std']
+w1_mean, w1_std = get_mean_and_std(data_dict['w1'])
+plt.plot(data_dict['N'], w1_mean, 'ro--')
+upper = w1_mean + w1_std
+lower = w1_mean - w1_std
+
 
 plt.fill_between(data_dict['N'], lower, upper, alpha=0.3)
 plt.title('Number of support versus N')

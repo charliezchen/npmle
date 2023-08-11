@@ -5,7 +5,3 @@ experiment:
   alpha_thres: 0.01
 
 simulation_times: 1000
-
-N_start: 1000
-N_end: 31000
-N_step: 1000

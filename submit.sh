@@ -1,0 +1,1 @@
+ssh greene "cd ~/workspace/nonparametric && sbatch --array=0-30 run_experiment.slurm"
