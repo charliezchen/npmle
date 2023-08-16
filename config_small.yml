@@ -6,7 +6,3 @@ experiment:
   reweight_type: all
 
 simulation_times: 30
-
-N_start: 100
-N_end: 1100
-N_step: 100

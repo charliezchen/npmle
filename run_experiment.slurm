@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --nodes=1
 #SBATCH --job-name=two_mixture
-#SBATCH --time=8:00:00
-#SBATCH --mem=20GB
+#SBATCH --time=10:00:00
+#SBATCH --mem=30GB
 #SBATCH --cpus-per-task=10
 #SBATCH --output=%x-%j-%a.out
 #SBATCH --mail-type=ALL
@@ -13,7 +13,7 @@ N_step=1000
 local_machine="CHARLLECHEN-MB0"
 mixture=2
 mixture_two_distance=1
-folder="two_mixture_save_data_seeding"
+folder="two_mixture_save_data_seeding_new_opt"
 
 if [ $(hostname) == $local_machine ]; then
     for i in {0..30}; do

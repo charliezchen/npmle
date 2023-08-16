@@ -202,7 +202,6 @@ class NonParametricEstimator:
             objective,
             x0,
             bounds=bnds, #  Bounds(0,1)
-            method='SLSQP',
             constraints=cons
         )
 
@@ -401,6 +400,8 @@ def experiment(
         logger.plot_history()
         logger.plot_nnl()
         logger.plot_all_keys()
+        print("Result:")
+        print(logger.result(alpha_thres))
     
     return logger.result(alpha_thres)
 
